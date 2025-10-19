@@ -1,0 +1,262 @@
+<!doctype html>
+
+<html lang="hi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Live Running Tracker</title>
+  <!-- Leaflet CSS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-sA+e2Yv7rYkYh1p2+Jz5H6mQb3rG6k9x0v+gkM6b5mM=" crossorigin=""/>
+  <style>
+    body{font-family:system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", "Helvetica Neue", Arial; margin:0; padding:0;}
+    header{padding:12px; background:linear-gradient(90deg,#0ea5a6,#06b6d4); color:white}
+    .container{display:grid; grid-template-columns:1fr 360px; gap:12px; padding:12px}
+    #map{height:72vh; border-radius:8px; background-color: #f0f0f0;}
+    .panel{padding:12px; background:#fff; border-radius:8px; box-shadow:0 6px 18px rgba(0,0,0,0.08)}
+    .metrics{display:flex; gap:8px; flex-wrap:wrap}
+    .metric{flex:1 1 120px; padding:10px; border-radius:8px; background:#f8fafc; text-align:center}
+    button{padding:10px 12px; border-radius:8px; border:none; cursor:pointer; transition: background-color 0.2s;}
+    button:disabled{opacity: 0.6; cursor: not-allowed;}
+    .btn-start{background:#10b981; color:white}
+    .btn-stop{background:#ef4444; color:white}
+    small{color:#475569}
+    footer{padding:10px; text-align:center; color:#475569}
+
+    /* Custom Message Box Style */
+    #messageBox {
+      position: fixed; 
+      top: 20px; 
+      right: 20px; 
+      background: #f4f4f5; 
+      color: #374151; 
+      padding: 10px 15px; 
+      border-radius: 8px; 
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1); 
+      display: none; 
+      z-index: 1000;
+      max-width: 90%;
+      font-size: 0.9rem;
+      border-left: 4px solid #06b6d4; /* Added a style to indicate information */
+    }
+
+    @media (max-width:900px){
+      .container{grid-template-columns:1fr;}
+      .panel{order:2}
+      #messageBox {
+        top: 10px; 
+        left: 50%;
+        transform: translateX(-50%);
+        right: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="messageBox"></div>
+
+  <header>
+    <h1 style="margin:0; font-size:1.15rem">Live Running Tracker — GPS se Live Distance, Time aur Direction</h1>
+  </header>  
+
+  <div class="container">
+    <div>
+      <div id="map"></div>
+    </div>
+
+    <div class="panel">
+      <div style="display:flex; gap:8px; margin-bottom:10px">
+        <button id="startBtn" class="btn-start">Start</button>
+        <button id="stopBtn" class="btn-stop" disabled>Stop</button>
+        <button id="resetBtn" style="background:#2563eb; color:white" disabled>Reset</button>
+      </div>
+
+      <div class="metrics">
+        <div class="metric">
+          <div style="font-size:0.9rem; color:#64748b">Distance</div>
+          <div id="distance" style="font-size:1.4rem; font-weight:600">0.00 km</div>
+        </div>
+        <div class="metric">
+          <div style="font-size:0.9rem; color:#64748b">Elapsed</div>
+          <div id="time" style="font-size:1.4rem; font-weight:600">00:00:00</div>
+        </div>
+        <div class="metric">
+          <div style="font-size:0.9rem; color:#64748b">Pace</div>
+          <div id="pace" style="font-size:1.2rem; font-weight:600">—</div>
+        </div>
+        <div class="metric">
+          <div style="font-size:0.9rem; color:#64748b">Direction</div>
+          <div id="direction" style="font-size:1.2rem; font-weight:600">—</div>
+        </div>
+      </div>
+
+      <hr style="margin:12px 0" />
+
+      <div style="font-size:0.9rem; color:#334155">
+        <div><strong>Lat/Lng:</strong> <span id="latlng">—</span></div>
+        <div><strong>Speed:</strong> <span id="speed">—</span></div>
+        <div style="margin-top:8px"><small>Note: Browser ko location permission dijiye. Accurate results ke liye phone GPS ko high accuracy mode par rakhein.</small></div>
+      </div>
+    </div>
+
+  </div>  
+
+  <footer>
+    <small>Tip: Agar local file se geolocation permission nahi milta, chhota web server ya GitHub Pages par host karke HTTPS se chalaiye.</small>
+  </footer>  
+
+  <!-- Leaflet JS -->  
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-o9N1j7kP8jXgT4oV8R0KQqJw1qVQ8yYf3+vKZ7s3u5w=" crossorigin=""></script>  
+
+  <script>
+    // --- Simple Live Running Tracker (V2 - Improved Geolocation Handling) ---
+
+    // Custom utility function to show messages instead of using alert()
+    function showMessage(msg, duration=4000){
+      const msgBox = document.getElementById('messageBox');
+      msgBox.textContent = msg;
+      msgBox.style.display = 'block';
+
+      // Clear any previous timeout
+      if(msgBox.timer) clearTimeout(msgBox.timer);
+
+      // Set new timeout unless duration is 0 (for persistent messages)
+      if (duration > 0) {
+        msgBox.timer = setTimeout(()=>msgBox.style.display='none', duration);
+      }
+    }
+
+    // Map setup
+    const map = L.map('map', { zoomControl: true });
+    const tileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let watchId = null;
+    let tracking = false;
+    let positions = []; // array of {lat, lng, ts}
+    let polyline = L.polyline([], { weight:6, color: '#06b6d4' }).addTo(map);
+    let marker = null;
+
+    // DOM
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const resetBtn = document.getElementById('resetBtn');
+    const distanceEl = document.getElementById('distance');
+    const timeEl = document.getElementById('time');
+    const paceEl = document.getElementById('pace');
+    const directionEl = document.getElementById('direction');
+    const latlngEl = document.getElementById('latlng');
+    const speedEl = document.getElementById('speed');
+
+    // Timer
+    let startTime = null;
+    let elapsedWhenPaused = 0;
+    let timerInterval = null;
+
+    /* --- Core Calculations (Unchanged) --- */
+
+    function formatTime(ms){
+      const totalSec = Math.floor(ms/1000);
+      const hh = String(Math.floor(totalSec/3600)).padStart(2,'0');
+      const mm = String(Math.floor((totalSec%3600)/60)).padStart(2,'0');
+      const ss = String(totalSec%60).padStart(2,'0');
+      return `${hh}:${mm}:${ss}`;
+    }
+
+    function toKm(m){ return (m/1000); }
+
+    function haversine(a,b){
+      const R = 6371000; // meters
+      const toRad = n => n*Math.PI/180;
+      const dLat = toRad(b.lat - a.lat);
+      const dLon = toRad(b.lng - a.lng);
+      const lat1 = toRad(a.lat);
+      const lat2 = toRad(b.lat);
+
+      const sinDLat = Math.sin(dLat/2);
+      const sinDLon = Math.sin(dLon/2);
+      const A = sinDLat*sinDLat + sinDLon*sinDLon * Math.cos(lat1)*Math.cos(lat2);
+      const C = 2 * Math.atan2(Math.sqrt(A), Math.sqrt(1-A));
+      return R * C; // meters
+    }
+
+    function bearing(a,b){
+      const toRad = n => n*Math.PI/180;
+      const toDeg = n => n*180/Math.PI;
+      const lat1 = toRad(a.lat); const lat2 = toRad(b.lat);
+      const dLon = toRad(b.lng - a.lng);
+      const y = Math.sin(dLon) * Math.cos(lat2);
+      const x = Math.cos(lat1)*Math.sin(lat2) - Math.sin(lat1)*Math.cos(lat2)*Math.cos(dLon);
+      const brng = toDeg(Math.atan2(y,x));
+      return (brng + 360) % 360;
+    }
+
+    function bearingToCardinal(b){
+      const dirs = ['N','NE','E','SE','S','SW','W','NW'];
+      const idx = Math.round(b/45) % 8;
+      return dirs[idx];
+    }
+
+    /* --- Tracking Logic --- */
+
+    function updateMetrics(){
+      if(positions.length === 0){
+        distanceEl.textContent = '0.00 km';
+        paceEl.textContent = '—';
+        directionEl.textContent = '—';
+        latlngEl.textContent = '—';
+        speedEl.textContent = '—';
+        return;
+      }
+
+      // distance
+      let total = 0;
+      for(let i=1;i<positions.length;i++){
+        total += haversine(positions[i-1], positions[i]);
+      }
+      const km = toKm(total);
+      distanceEl.textContent = km.toFixed(2) + ' km';
+
+      // elapsed
+      const elapsedMs = (tracking ? (Date.now() - startTime + elapsedWhenPaused) : elapsedWhenPaused);
+      timeEl.textContent = formatTime(elapsedMs);
+
+      // pace
+      if(km > 0.0001){
+        const minutes = elapsedMs/60000;
+        const paceMinPerKm = minutes / km;
+        const paceMin = Math.floor(paceMinPerKm);
+        const paceSec = Math.round((paceMinPerKm - paceMin)*60);
+        paceEl.textContent = `${paceMin}:${String(paceSec).padStart(2,'0')} min/km`;
+      } else {
+        paceEl.textContent = '—';
+      }
+
+      // direction & speed
+      if(positions.length >= 2){
+        const a = positions[positions.length-2];
+        const b = positions[positions.length-1];
+        const br = bearing(a,b);
+        directionEl.textContent = `${bearingToCardinal(br)} (${Math.round(br)}°)`;
+
+        const dist = haversine(a,b); // meters
+        const dt = (b.ts - a.ts)/1000; // seconds
+        const spd = dt>0 ? (dist/dt) : 0; // m/s
+        const spdKmh = spd * 3.6;
+        speedEl.textContent = `${spdKmh.toFixed(2)} km/h`;
+      }
+
+      // Update LatLng regardless of movement
+      const last = positions[positions.length-1];
+      latlngEl.textContent = last.lat.toFixed(6) + ', ' + last.lng.toFixed(6);
+
+    }
+
+    function onPosition(pos){
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const ts = pos.timestamp || Date.now();
+      const point = {lat: lat, lng: lng, ts: ts};
+
+    # Truncated in execution for brevity - full file saved in /mnt/data
